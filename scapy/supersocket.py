@@ -110,6 +110,48 @@ class SuperSocket:
         else:
             return 0
 
+    def _process_ancillary_data(self, pkt, ancdata):
+        timestamp = None
+
+        for cmsg_lvl, cmsg_type, cmsg_data in ancdata:
+            # Check available ancillary data
+            if (cmsg_lvl == SOL_PACKET and cmsg_type == PACKET_AUXDATA):
+                # Parse AUXDATA
+                try:
+                    auxdata = tpacket_auxdata.from_buffer_copy(cmsg_data)
+                except ValueError:
+                    # Note: according to Python documentation, recvmsg()
+                    #       can return a truncated message. A ValueError
+                    #       exception likely indicates that Auxiliary
+                    #       Data is not supported by the Linux kernel.
+                    return pkt, timestamp
+
+                if auxdata.tp_vlan_tci != 0 or \
+                        auxdata.tp_status & TP_STATUS_VLAN_VALID:
+                    # Insert VLAN tag
+                    tpid = ETH_P_8021Q
+                    if auxdata.tp_status & TP_STATUS_VLAN_TPID_VALID:
+                        tpid = auxdata.tp_vlan_tpid
+                    tag = struct.pack(
+                        "!HH",
+                        tpid,
+                        auxdata.tp_vlan_tci
+                    )
+                    pkt = pkt[:12] + tag + pkt[12:]
+            elif cmsg_lvl == socket.SOL_SOCKET and \
+                    cmsg_type == SO_TIMESTAMPNS:
+                length = len(cmsg_data)
+                if length == 16:  # __kernel_timespec
+                    tmp = struct.unpack("ll", cmsg_data)
+                elif length == 8:  # timespec
+                    tmp = struct.unpack("ii", cmsg_data)
+                else:
+                    log_runtime.warning("Unknown timespec format.. ?!")
+                    continue
+                timestamp = tmp[0] + tmp[1] * 1e-9
+
+        return pkt, timestamp
+
     if six.PY2 or WINDOWS:
         def _recv_raw(self, sock, x):
             # type: (socket.socket, int) -> Tuple[bytes, Any, Optional[float]]
@@ -130,41 +172,7 @@ class SuperSocket:
             pkt, ancdata, flags, sa_ll = sock.recvmsg(x, flags_len)
             if not pkt:
                 return pkt, sa_ll, timestamp
-            for cmsg_lvl, cmsg_type, cmsg_data in ancdata:
-                # Check available ancillary data
-                if (cmsg_lvl == SOL_PACKET and cmsg_type == PACKET_AUXDATA):
-                    # Parse AUXDATA
-                    try:
-                        auxdata = tpacket_auxdata.from_buffer_copy(cmsg_data)
-                    except ValueError:
-                        # Note: according to Python documentation, recvmsg()
-                        #       can return a truncated message. A ValueError
-                        #       exception likely indicates that Auxiliary
-                        #       Data is not supported by the Linux kernel.
-                        return pkt, sa_ll, timestamp
-                    if auxdata.tp_vlan_tci != 0 or \
-                            auxdata.tp_status & TP_STATUS_VLAN_VALID:
-                        # Insert VLAN tag
-                        tpid = ETH_P_8021Q
-                        if auxdata.tp_status & TP_STATUS_VLAN_TPID_VALID:
-                            tpid = auxdata.tp_vlan_tpid
-                        tag = struct.pack(
-                            "!HH",
-                            tpid,
-                            auxdata.tp_vlan_tci
-                        )
-                        pkt = pkt[:12] + tag + pkt[12:]
-                elif cmsg_lvl == socket.SOL_SOCKET and \
-                        cmsg_type == SO_TIMESTAMPNS:
-                    length = len(cmsg_data)
-                    if length == 16:  # __kernel_timespec
-                        tmp = struct.unpack("ll", cmsg_data)
-                    elif length == 8:  # timespec
-                        tmp = struct.unpack("ii", cmsg_data)
-                    else:
-                        log_runtime.warning("Unknown timespec format.. ?!")
-                        continue
-                    timestamp = tmp[0] + tmp[1] * 1e-9
+            pkt, timestamp = self._process_ancillary_data(pkt, ancdata)
             return pkt, sa_ll, timestamp
 
     def recv_raw(self, x=MTU):

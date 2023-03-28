@@ -349,6 +349,20 @@ class ISOTPNativeSocket(SuperSocket):
             log_isotp.warning('Provide a basecls ')
         self.basecls = basecls
 
+    def _recv_raw(self, sock, x):
+        # type: (socket.socket, int) -> Tuple[bytes, Any, Optional[float]]
+        """Internal function to receive a Packet,
+        and process ancillary data.
+        """
+        timestamp = None
+
+        flags_len = socket.CMSG_LEN(4096)
+        pkt, ancdata, flags, sa_ll = sock.recvmsg(x, flags_len, socket.MSG_DONTWAIT)
+        if not pkt:
+            return pkt, sa_ll, timestamp
+        pkt, timestamp = self._process_ancillary_data(pkt, ancdata)
+        return pkt, sa_ll, timestamp
+
     def recv_raw(self, x=0xffff):
         # type: (int) -> Tuple[Optional[Type[Packet]], Optional[bytes], Optional[float]]  # noqa: E501
         """
